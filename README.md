@@ -26,15 +26,15 @@ A minimalist notepad application for Linux with speech-to-text capabilities usin
 
 ## Screenshots
 
- ![alt text](screenshots/v1/1.png)
+ ### Main UI
 
-![alt text](screenshots/v1/2.png)
+ ![alt text](screenshots/releases/v2/2.png)
 
-![alt text](screenshots/v1/3.png)
+ ---
 
-![alt text](screenshots/v1/4.png)
+ ### Settings & API Key Configuration
 
-![alt text](screenshots/v1/5.png)
+ ![alt text](screenshots/releases/v2/3.png)
 
 ## Installation
 
