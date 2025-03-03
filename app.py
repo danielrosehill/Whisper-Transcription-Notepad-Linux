@@ -258,38 +258,60 @@ class MainWindow(QMainWindow):
         
         # First row of buttons
         buttons_row1 = QHBoxLayout()
-        self.record_btn = QPushButton("Record")
+        self.record_btn = QPushButton()
+        self.record_btn.setIcon(QIcon.fromTheme("media-record", QIcon.fromTheme("media-playback-start")))
+        self.record_btn.setToolTip("Record")
         self.record_btn.clicked.connect(self.start_recording)
         self.record_btn.setMinimumHeight(40)
+        self.record_btn.setMinimumWidth(40)
         buttons_row1.addWidget(self.record_btn)
         
-        self.pause_btn = QPushButton("Pause")
+        self.pause_btn = QPushButton()
+        self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
+        self.pause_btn.setToolTip("Pause")
         self.pause_btn.clicked.connect(self.pause_recording)
         self.pause_btn.setEnabled(False)
         self.pause_btn.setMinimumHeight(40)
+        self.pause_btn.setMinimumWidth(40)
         buttons_row1.addWidget(self.pause_btn)
         
-        self.stop_btn = QPushButton("Stop")
+        self.stop_btn = QPushButton()
+        self.stop_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
+        self.stop_btn.setToolTip("Stop")
         self.stop_btn.clicked.connect(self.stop_recording)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setMinimumHeight(40)
+        self.stop_btn.setMinimumWidth(40)
         buttons_row1.addWidget(self.stop_btn)
         
         recording_layout.addLayout(buttons_row1)
         
         # Second row of buttons
         buttons_row2 = QHBoxLayout()
-        self.clear_btn = QPushButton("Clear")
+        self.clear_btn = QPushButton()
+        self.clear_btn.setIcon(QIcon.fromTheme("edit-clear", QIcon.fromTheme("edit-delete")))
+        self.clear_btn.setToolTip("Clear")
         self.clear_btn.clicked.connect(self.clear_recording)
         self.clear_btn.setEnabled(False)
         self.clear_btn.setMinimumHeight(40)
+        self.clear_btn.setMinimumWidth(40)
         buttons_row2.addWidget(self.clear_btn)
         
+        # Replace the transcribe button with a more descriptive one
         self.transcribe_btn = QPushButton("Transcribe")
+        self.transcribe_btn.setIcon(QIcon.fromTheme("document-edit", QIcon.fromTheme("edit-paste")))
         self.transcribe_btn.clicked.connect(self.transcribe_audio)
         self.transcribe_btn.setEnabled(False)
         self.transcribe_btn.setMinimumHeight(40)
         buttons_row2.addWidget(self.transcribe_btn)
+        
+        # Replace Stop & Transcribe with a clearer button
+        self.stop_and_transcribe_btn = QPushButton("Transcribe Now")
+        self.stop_and_transcribe_btn.setIcon(QIcon.fromTheme("document-save", QIcon.fromTheme("document-send")))
+        self.stop_and_transcribe_btn.clicked.connect(self.stop_and_transcribe)
+        self.stop_and_transcribe_btn.setEnabled(False)
+        self.stop_and_transcribe_btn.setMinimumHeight(40)
+        buttons_row2.addWidget(self.stop_and_transcribe_btn)
         
         recording_layout.addLayout(buttons_row2)
         
@@ -323,10 +345,12 @@ class MainWindow(QMainWindow):
         text_controls_layout = QHBoxLayout()
         
         self.copy_btn = QPushButton("Copy to Clipboard")
+        self.copy_btn.setIcon(QIcon.fromTheme("edit-copy"))
         self.copy_btn.clicked.connect(self.copy_to_clipboard)
         text_controls_layout.addWidget(self.copy_btn)
         
         self.download_btn = QPushButton("Download as Markdown")
+        self.download_btn.setIcon(QIcon.fromTheme("document-save"))
         self.download_btn.clicked.connect(self.download_as_markdown)
         text_controls_layout.addWidget(self.download_btn)
         
@@ -350,6 +374,7 @@ class MainWindow(QMainWindow):
         api_key_layout.addWidget(self.api_key_input, 0, 1)
         
         self.save_api_key_btn = QPushButton("Save API Key")
+        self.save_api_key_btn.setIcon(QIcon.fromTheme("document-save"))
         self.save_api_key_btn.clicked.connect(self.save_api_key)
         api_key_layout.addWidget(self.save_api_key_btn, 0, 2)
         
@@ -365,6 +390,7 @@ class MainWindow(QMainWindow):
         audio_device_settings_layout.addWidget(self.default_audio_device_combo, 0, 1)
         
         self.save_default_audio_btn = QPushButton("Save as Default")
+        self.save_default_audio_btn.setIcon(QIcon.fromTheme("document-save"))
         self.save_default_audio_btn.clicked.connect(self.save_default_audio_device)
         audio_device_settings_layout.addWidget(self.save_default_audio_btn, 0, 2)
         
@@ -565,6 +591,7 @@ class MainWindow(QMainWindow):
                     self.record_btn.setEnabled(False)
                     self.pause_btn.setEnabled(True)
                     self.stop_btn.setEnabled(True)
+                    self.stop_and_transcribe_btn.setEnabled(True)
                     self.clear_btn.setEnabled(False)
                     self.transcribe_btn.setEnabled(False)
                 else:
@@ -580,7 +607,12 @@ class MainWindow(QMainWindow):
         """Pause or resume audio recording"""
         if self.recorder.isRunning():
             self.recorder.pause()
-            self.pause_btn.setText("Resume" if self.recorder.paused else "Pause")
+            if self.recorder.paused:
+                self.pause_btn.setIcon(QIcon.fromTheme("media-playback-start"))
+                self.pause_btn.setToolTip("Resume")
+            else:
+                self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
+                self.pause_btn.setToolTip("Pause")
     
     def stop_recording(self):
         """Stop audio recording"""
@@ -589,10 +621,29 @@ class MainWindow(QMainWindow):
             self.recorder.wait()
             self.record_btn.setEnabled(True)
             self.pause_btn.setEnabled(False)
-            self.pause_btn.setText("Pause")
+            self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
+            self.pause_btn.setToolTip("Pause")
             self.stop_btn.setEnabled(False)
+            self.stop_and_transcribe_btn.setEnabled(False)
             self.clear_btn.setEnabled(True)
             self.transcribe_btn.setEnabled(True)
+    
+    def stop_and_transcribe(self):
+        """Stop recording and immediately transcribe the audio"""
+        if self.recorder.isRunning():
+            self.recorder.stop()
+            self.recorder.wait()
+            self.record_btn.setEnabled(True)
+            self.pause_btn.setEnabled(False)
+            self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
+            self.pause_btn.setToolTip("Pause")
+            self.stop_btn.setEnabled(False)
+            self.stop_and_transcribe_btn.setEnabled(False)
+            self.clear_btn.setEnabled(True)
+            self.transcribe_btn.setEnabled(True)
+            
+            # Immediately start transcription
+            self.transcribe_audio()
     
     def clear_recording(self):
         """Clear the current recording"""
