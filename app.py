@@ -13,16 +13,19 @@ import datetime
 import base64
 import sounddevice as sd
 import numpy as np
+import math
 import requests
 from scipy.io.wavfile import write as write_wav
+from pydub import AudioSegment
+import ffmpeg
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QComboBox, QLabel, QTextEdit, QFileDialog,
-    QMessageBox, QStatusBar, QAction, QToolBar, QSplitter,
+    QMessageBox, QStatusBar, QAction, QToolBar, QSplitter, QProgressBar,
     QTabWidget, QLineEdit, QGridLayout, QGroupBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QDir, QTimer
-from PyQt5.QtGui import QIcon, QClipboard
+from PyQt5.QtGui import QIcon, QClipboard, QColor
 from dotenv import load_dotenv
 import openai
 
@@ -48,6 +51,7 @@ class AudioRecorder(QThread):
     """Thread for recording audio without blocking the UI"""
     update_status = pyqtSignal(str)
     update_timer = pyqtSignal(int)  # Signal to update recording time
+    update_volume = pyqtSignal(float)  # Signal to update volume meter
     
     def __init__(self, sample_rate=SAMPLE_RATE):
         super().__init__()
@@ -86,9 +90,22 @@ class AudioRecorder(QThread):
         print("Recording stopped")
         
         if self.audio_data:
-            self.temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+            # First save as WAV (temporary)
+            temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
             audio_array = np.concatenate(self.audio_data, axis=0)
-            write_wav(self.temp_file.name, self.sample_rate, audio_array)
+            write_wav(temp_wav.name, self.sample_rate, audio_array)
+            
+            # Convert WAV to MP3 using pydub (much smaller file size)
+            self.temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            sound = AudioSegment.from_wav(temp_wav.name)
+            
+            # Normalize audio to improve transcription quality
+            sound = sound.normalize()
+            sound.export(self.temp_file.name, format="mp3", bitrate="128k")
+            
+            # Remove the temporary WAV file
+            os.unlink(temp_wav.name)
+            
             self.update_status.emit(f"Recording saved to temporary file: {self.temp_file.name}")
         else:
             self.update_status.emit("No audio data recorded")
@@ -96,6 +113,16 @@ class AudioRecorder(QThread):
     def _audio_callback(self, indata, frames, time, status):
         """Callback function for audio recording"""
         if not self.paused and self.recording:
+            # Calculate volume level (RMS)
+            volume_norm = np.linalg.norm(indata) / np.sqrt(frames)
+            
+            # Scale to a reasonable range (0-100)
+            # The scaling factor may need adjustment based on your microphone sensitivity
+            volume_level = min(100, volume_norm * 20)
+            
+            # Emit signal with volume level
+            self.update_volume.emit(volume_level)
+            
             self.audio_data.append(indata.copy())
     
     def stop(self):
@@ -139,6 +166,7 @@ class AudioRecorder(QThread):
 class TranscriptionWorker(QThread):
     """Thread for handling OpenAI API transcription"""
     transcription_complete = pyqtSignal(str)
+    transcription_progress = pyqtSignal(int, int)  # current chunk, total chunks
     transcription_error = pyqtSignal(str)
     update_status = pyqtSignal(str)
     
@@ -146,6 +174,8 @@ class TranscriptionWorker(QThread):
         super().__init__()
         self.audio_file = audio_file
         self.api_key = api_key
+        self.max_chunk_duration = 300  # 5 minutes per chunk in seconds
+        self.chunk_overlap = 5  # 5 seconds overlap between chunks
     
     def run(self):
         """Start the transcription process"""
@@ -155,31 +185,96 @@ class TranscriptionWorker(QThread):
         
         try:
             self.update_status.emit("Preparing audio for OpenAI API...")
-            
-            # OpenAI API supports direct file upload
+            # Initialize OpenAI client without proxies parameter
             client = openai.OpenAI(api_key=self.api_key)
             
-            self.update_status.emit("Sending request to OpenAI API...")
+            # Check audio duration
+            audio = AudioSegment.from_file(self.audio_file)
+            duration_seconds = len(audio) / 1000  # pydub uses milliseconds
             
+            # If audio is short enough, transcribe directly
+            if duration_seconds <= self.max_chunk_duration:
+                self.update_status.emit("Sending request to OpenAI API...")
+                transcript = self._transcribe_file(client, self.audio_file)
+                if transcript:
+                    self.transcription_complete.emit(transcript)
+                    self.update_status.emit("Transcription completed successfully")
+                else:
+                    self.transcription_error.emit("No transcription returned from API")
+            else:
+                # For longer audio, split into chunks and transcribe each
+                self.update_status.emit(f"Audio duration: {duration_seconds:.1f} seconds. Splitting into chunks...")
+                transcripts = self._transcribe_long_audio(client, audio, duration_seconds)
+                if transcripts:
+                    # Combine all transcripts
+                    full_transcript = " ".join(transcripts)
+                    self.transcription_complete.emit(full_transcript)
+                    self.update_status.emit("Transcription of all chunks completed successfully")
+                else:
+                    self.transcription_error.emit("Failed to transcribe audio chunks")
+                
+        except Exception as e:
+            self.transcription_error.emit(f"Error during transcription: {str(e)}")
+    
+    def _transcribe_file(self, client, file_path):
+        """Transcribe a single audio file using the OpenAI API"""
+        try:
             # Open the audio file and send it to the OpenAI API
-            with open(self.audio_file, "rb") as audio_file:
+            with open(file_path, "rb") as audio_file:
                 # Use the OpenAI API to transcribe the audio
                 response = client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file
                 )
-            
-            # Extract the transcription from the response
-            transcript = response.text
-            
-            if transcript:
-                self.transcription_complete.emit(transcript)
-                self.update_status.emit("Transcription completed successfully")
-            else:
-                self.transcription_error.emit("No transcription returned from API")
-                
+            return response.text
         except Exception as e:
-            self.transcription_error.emit(f"Error during transcription: {str(e)}")
+            error_msg = f"Error transcribing file: {str(e)}"
+            self.update_status.emit(error_msg)
+            print(f"Transcription error details: {error_msg}")
+            return None
+            
+    def _transcribe_long_audio(self, client, audio, duration_seconds):
+        """Split long audio into chunks and transcribe each chunk"""
+        try:
+            # Calculate number of chunks needed
+            num_chunks = math.ceil(duration_seconds / self.max_chunk_duration)
+            self.update_status.emit(f"Splitting audio into {num_chunks} chunks...")
+            
+            # Create temp directory for chunks
+            temp_dir = tempfile.mkdtemp()
+            chunk_files = []
+            transcripts = []
+            
+            # Split audio into chunks with overlap
+            for i in range(num_chunks):
+                self.transcription_progress.emit(i+1, num_chunks)
+                
+                start_ms = i * self.max_chunk_duration * 1000 - (i > 0) * self.chunk_overlap * 1000
+                start_ms = max(0, start_ms)  # Ensure we don't go negative
+                
+                end_ms = min((i + 1) * self.max_chunk_duration * 1000, len(audio))
+                
+                # Extract chunk
+                chunk = audio[start_ms:end_ms]
+                chunk_file = os.path.join(temp_dir, f"chunk_{i}.mp3")
+                chunk.export(chunk_file, format="mp3", bitrate="128k")
+                chunk_files.append(chunk_file)
+                
+                # Transcribe chunk
+                self.update_status.emit(f"Transcribing chunk {i+1} of {num_chunks}...")
+                transcript = self._transcribe_file(client, chunk_file)
+                if transcript:
+                    transcripts.append(transcript)
+            
+            # Clean up temp files
+            for file in chunk_files:
+                os.unlink(file)
+            os.rmdir(temp_dir)
+            
+            return transcripts
+        except Exception as e:
+            self.update_status.emit(f"Error processing long audio: {str(e)}")
+            return []
 
 
 class MainWindow(QMainWindow):
@@ -200,6 +295,7 @@ class MainWindow(QMainWindow):
         # Initialize audio recorder
         self.recorder = AudioRecorder()
         self.recorder.update_status.connect(self.update_status)
+        self.recorder.update_volume.connect(self.update_volume_meter)
         self.recorder.update_timer.connect(self.update_timer)
         
         # Initialize transcription worker
@@ -321,6 +417,32 @@ class MainWindow(QMainWindow):
         # Recording time display in a styled frame
         timer_frame = QGroupBox("Recording Time")
         timer_layout = QVBoxLayout()
+        
+        # Add volume meter
+        volume_layout = QHBoxLayout()
+        volume_layout.addWidget(QLabel("Volume:"))
+        self.volume_meter = QProgressBar()
+        self.volume_meter.setRange(0, 100)
+        self.volume_meter.setValue(0)
+        self.volume_meter.setTextVisible(False)
+        self.volume_meter.setMinimumWidth(150)
+        self.volume_meter.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                background: #f0f0f0;
+                height: 15px;
+            }
+            QProgressBar::chunk {
+                background-color: qlineargradient(x1: 0, y1: 0.5, x2: 1, y2: 0.5, 
+                                                 stop: 0 #0a0, stop: 0.6 #0f0, stop: 1 #f00);
+                border-radius: 5px;
+            }
+        """)
+        volume_layout.addWidget(self.volume_meter)
+        timer_layout.addLayout(volume_layout)
+        
+        # Add recording time label
         self.recording_time_label = QLabel("00:00")
         self.recording_time_label.setAlignment(Qt.AlignCenter)
         self.recording_time_label.setStyleSheet("""
@@ -348,6 +470,12 @@ class MainWindow(QMainWindow):
         self.copy_btn.setIcon(QIcon.fromTheme("edit-copy"))
         self.copy_btn.clicked.connect(self.copy_to_clipboard)
         text_controls_layout.addWidget(self.copy_btn)
+        
+        # Add clear text button
+        self.clear_text_btn = QPushButton("Clear Text")
+        self.clear_text_btn.setIcon(QIcon.fromTheme("edit-clear"))
+        self.clear_text_btn.clicked.connect(self.clear_text)
+        text_controls_layout.addWidget(self.clear_text_btn)
         
         self.download_btn = QPushButton("Download as Markdown")
         self.download_btn.setIcon(QIcon.fromTheme("document-save"))
@@ -617,6 +745,8 @@ class MainWindow(QMainWindow):
     def stop_recording(self):
         """Stop audio recording"""
         if self.recorder.isRunning():
+            # Reset volume meter
+            self.volume_meter.setValue(0)
             self.recorder.stop()
             self.recorder.wait()
             self.record_btn.setEnabled(True)
@@ -631,6 +761,8 @@ class MainWindow(QMainWindow):
     def stop_and_transcribe(self):
         """Stop recording and immediately transcribe the audio"""
         if self.recorder.isRunning():
+            # Reset volume meter
+            self.volume_meter.setValue(0)
             self.recorder.stop()
             self.recorder.wait()
             self.record_btn.setEnabled(True)
@@ -648,6 +780,7 @@ class MainWindow(QMainWindow):
     def clear_recording(self):
         """Clear the current recording"""
         self.recorder.clear()
+        self.volume_meter.setValue(0)  # Reset volume meter
         self.clear_btn.setEnabled(False)
         self.transcribe_btn.setEnabled(False)
     
@@ -661,11 +794,16 @@ class MainWindow(QMainWindow):
         self.transcription_worker = TranscriptionWorker(audio_file, OPENAI_API_KEY)
         self.transcription_worker.transcription_complete.connect(self.handle_transcription_complete)
         self.transcription_worker.transcription_error.connect(self.handle_transcription_error)
+        self.transcription_worker.transcription_progress.connect(self.handle_transcription_progress)
         self.transcription_worker.update_status.connect(self.update_status)
         self.transcription_worker.start()
         
         self.transcribe_btn.setEnabled(False)
         self.update_status("Transcription started...")
+
+    def handle_transcription_progress(self, current, total):
+        """Handle transcription progress updates"""
+        self.update_status(f"Transcribing chunk {current} of {total}...")
     
     def handle_transcription_complete(self, transcript):
         """Handle completed transcription"""
@@ -698,6 +836,22 @@ class MainWindow(QMainWindow):
             self.update_status("Text copied to clipboard")
         else:
             self.update_status("No text to copy")
+    
+    def clear_text(self):
+        """Clear the text in the text editor"""
+        if self.text_edit.toPlainText():
+            reply = QMessageBox.question(
+                self, 
+                "Clear Text", 
+                "Are you sure you want to clear all text?",
+                QMessageBox.Yes | QMessageBox.No, 
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.text_edit.clear()
+                self.update_status("Text cleared")
+        else:
+            self.update_status("No text to clear")
     
     def download_as_markdown(self):
         """Save text as markdown file"""
@@ -751,27 +905,49 @@ class MainWindow(QMainWindow):
         self.recording_time_label.setText(time_str)
         print(f"UI timer updated: {time_str}")
         
-        # Change color based on recording duration
-        if seconds > 300:  # 5 minutes
-            self.recording_time_label.setStyleSheet("""
-                font-size: 36px;
-                font-weight: bold;
-                color: #CC0000;
-                padding: 10px;
+    def update_volume_meter(self, level):
+        """Update volume meter with current audio level"""
+        self.volume_meter.setValue(int(level))
+        
+        # Change color based on volume level
+        if level > 80:  # High volume
+            self.volume_meter.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    background: #f0f0f0;
+                    height: 15px;
+                }
+                QProgressBar::chunk {
+                    background-color: #f00;
+                    border-radius: 5px;
+                }
             """)
-        elif seconds > 120:  # 2 minutes
-            self.recording_time_label.setStyleSheet("""
-                font-size: 36px;
-                font-weight: bold;
-                color: #FF6600;
-                padding: 10px;
+        elif level > 40:  # Medium volume
+            self.volume_meter.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    background: #f0f0f0;
+                    height: 15px;
+                }
+                QProgressBar::chunk {
+                    background-color: #ff0;
+                    border-radius: 5px;
+                }
             """)
-        else:
-            self.recording_time_label.setStyleSheet("""
-                font-size: 36px;
-                font-weight: bold;
-                color: #333;
-                padding: 10px;
+        else:  # Low volume
+            self.volume_meter.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    background: #f0f0f0;
+                    height: 15px;
+                }
+                QProgressBar::chunk {
+                    background-color: #0a0;
+                    border-radius: 5px;
+                }
             """)
 
     def closeEvent(self, event):
@@ -779,6 +955,7 @@ class MainWindow(QMainWindow):
         # Stop recording if active
         if self.recorder.isRunning():
             self.recorder.stop()
+            self.volume_meter.setValue(0)  # Reset volume meter
             self.recorder.wait()
         
         # Clean up temporary files
@@ -787,6 +964,16 @@ class MainWindow(QMainWindow):
                 os.unlink(self.recorder.temp_file.name)
             except:
                 pass
+                
+        # Clean up any other temporary files that might exist
+        try:
+            for file in os.listdir(tempfile.gettempdir()):
+                if file.endswith('.wav') or file.endswith('.mp3'):
+                    if os.path.isfile(os.path.join(tempfile.gettempdir(), file)):
+                        os.unlink(os.path.join(tempfile.gettempdir(), file))
+        except Exception as e:
+            print(f"Error cleaning up temporary files: {e}")
+            pass
         
         # Accept the close event
         event.accept()
