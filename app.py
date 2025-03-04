@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QDir, QTimer
 from PyQt5.QtGui import QIcon, QClipboard, QColor
 from dotenv import load_dotenv
-import openai
+from openai import OpenAI
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,7 +39,6 @@ if not OPENAI_API_KEY:
     sys.exit(1)
 
 # Configure OpenAI client
-openai.api_key = OPENAI_API_KEY
 
 # Constants
 SAMPLE_RATE = 44100  # Sample rate for audio recording
@@ -176,7 +175,7 @@ class TranscriptionWorker(QThread):
         self.api_key = api_key
         self.max_chunk_duration = 300  # 5 minutes per chunk in seconds
         self.chunk_overlap = 5  # 5 seconds overlap between chunks
-    
+        
     def run(self):
         """Start the transcription process"""
         if not self.audio_file or not os.path.exists(self.audio_file):
@@ -185,11 +184,11 @@ class TranscriptionWorker(QThread):
         
         try:
             self.update_status.emit("Preparing audio for OpenAI API...")
-            # Initialize OpenAI client without proxies parameter
-            client = openai.OpenAI(api_key=self.api_key)
+            # Initialize OpenAI client
+            client = OpenAI(api_key=self.api_key)
             
             # Check audio duration
-            audio = AudioSegment.from_file(self.audio_file)
+            audio = AudioSegment.from_file(self.audio_file)  # Line 191
             duration_seconds = len(audio) / 1000  # pydub uses milliseconds
             
             # If audio is short enough, transcribe directly
@@ -219,18 +218,33 @@ class TranscriptionWorker(QThread):
     def _transcribe_file(self, client, file_path):
         """Transcribe a single audio file using the OpenAI API"""
         try:
-            # Open the audio file and send it to the OpenAI API
+            # Following the documentation example
             with open(file_path, "rb") as audio_file:
                 # Use the OpenAI API to transcribe the audio
                 response = client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=audio_file
+                    file=audio_file,
+                    response_format="text"  # Explicitly request text format
                 )
-            return response.text
+                
+            # Check if response has text attribute
+            if hasattr(response, 'text'):
+                return response.text
+            elif isinstance(response, str):
+                return response
+            elif response is not None:  # Log the raw response if it's not None and not text
+                print(f"Raw API response: {response}")
+            else:
+                print(f"Unexpected response format: {response}")  # Line 239
+                return None
+                
         except Exception as e:
             error_msg = f"Error transcribing file: {str(e)}"
             self.update_status.emit(error_msg)
+            print(f"File path for transcription: {file_path}")  # Print file path in case of error
             print(f"Transcription error details: {error_msg}")
+            import traceback  # Line 246
+            traceback.print_exc()
             return None
             
     def _transcribe_long_audio(self, client, audio, duration_seconds):
@@ -697,7 +711,6 @@ class MainWindow(QMainWindow):
             # Update the global API key
             global OPENAI_API_KEY
             OPENAI_API_KEY = api_key
-            openai.api_key = api_key
             
             self.update_status("API key saved")
         else:
