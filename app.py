@@ -39,6 +39,7 @@ if not OPENAI_API_KEY:
     sys.exit(1)
 
 # Configure OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Constants
 SAMPLE_RATE = 44100  # Sample rate for audio recording
@@ -184,8 +185,11 @@ class TranscriptionWorker(QThread):
         
         try:
             self.update_status.emit("Preparing audio for OpenAI API...")
-            # Initialize OpenAI client
-            client = OpenAI(api_key=self.api_key)
+            # Initialize OpenAI client with explicit proxy settings
+            client = OpenAI(
+                api_key=self.api_key,
+                http_client=requests.Session()
+            )
             
             # Check audio duration
             audio = AudioSegment.from_file(self.audio_file)  # Line 191
@@ -213,6 +217,10 @@ class TranscriptionWorker(QThread):
                     self.transcription_error.emit("Failed to transcribe audio chunks")
                 
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Transcription error: {str(e)}")
+            print(f"Error details:\n{error_details}")
             self.transcription_error.emit(f"Error during transcription: {str(e)}")
     
     def _transcribe_file(self, client, file_path):
@@ -226,6 +234,7 @@ class TranscriptionWorker(QThread):
                     file=audio_file,
                     response_format="text"  # Explicitly request text format
                 )
+                print(f"API response type: {type(response)}")
                 
             # Check if response has text attribute
             if hasattr(response, 'text'):
