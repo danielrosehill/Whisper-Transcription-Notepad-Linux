@@ -1,8 +1,14 @@
-# Linux-Cloud-STT-Notepad
+# Speech To Text Notepad With AI Text Optimisation 
 
  ![alt text](screenshots/releases/v4/2.png)
 
-A minimalist notepad application for Linux with speech-to-text capabilities using the OpenAI API.
+ This project offers a desktop note-taking utility for the Linux desktop that utilizes OpenAI Whisper through its cloud API to accurately transcribe text. 
+ 
+ An AI optimization feature sends the transcribed text for light editing via OpenAI LLM, preserving the meaning while organizing it for clarity. 
+
+I developed this application because although I discovered some interesting note-taking applications for Linux, I couldn't find any that utilized speech-to-text via APIs instead of locally deployed models. I have had much better success with APIs and find the associated fees to be reasonable. 
+
+This application will be periodically updated as I use it for my personal needs.
 
 ## Features
 

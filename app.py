@@ -407,21 +407,25 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("Linux Cloud STT Notepad")
+        self.setWindowTitle('Linux Cloud STT Notepad')
         self.setGeometry(100, 100, 800, 600)
-        
-        # Create central widget with tab widget
-        central_widget = QWidget()
-        main_layout = QVBoxLayout(central_widget)
-        
+
+        # Create main widget and layout
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        layout = QVBoxLayout()
+        main_widget.setLayout(layout)
+
         # Create tab widget
         self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
-        
+        layout.addWidget(self.tab_widget)
+
         # Create main tab
         main_tab = QWidget()
-        main_tab_layout = QVBoxLayout(main_tab)
-        
+        main_layout = QVBoxLayout()
+        main_tab.setLayout(main_layout)
+        self.tab_widget.addTab(main_tab, "Main")
+
         # Audio device selection
         audio_device_layout = QHBoxLayout()
         audio_device_layout.addWidget(QLabel("Audio Input Source:"))
@@ -431,7 +435,7 @@ class MainWindow(QMainWindow):
         save_device_btn.setToolTip("Save selected audio device")
         save_device_btn.clicked.connect(self.save_audio_device)
         audio_device_layout.addWidget(save_device_btn)
-        main_tab_layout.addLayout(audio_device_layout)
+        main_layout.addLayout(audio_device_layout)
         
         # Main controls section
         controls_section = QHBoxLayout()
@@ -505,7 +509,7 @@ class MainWindow(QMainWindow):
         # Add timer to the right side
         controls_section.addWidget(timer_frame, 3)
         
-        main_tab_layout.addLayout(controls_section)
+        main_layout.addLayout(controls_section)
         
         # === ACTION BUTTONS GROUP ===
         action_group = QGroupBox("Actions")
@@ -541,21 +545,19 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.all_in_one_btn)
         
         action_group.setLayout(action_layout)
-        main_tab_layout.addWidget(action_group)
+        main_layout.addWidget(action_group)
         
         # Text area
         self.text_edit = QTextEdit()
-        main_tab_layout.addWidget(self.text_edit)
+        main_layout.addWidget(self.text_edit)
         
-        # Add main tab to tab widget
-        self.tab_widget.addTab(main_tab, "Main")
-        
-        # Add about tab
+        # Create settings tab
+        settings_tab = self._create_settings_tab()
+        self.tab_widget.addTab(settings_tab, "Settings")
+
+        # Create about tab
         about_tab = self._create_about_tab()
         self.tab_widget.addTab(about_tab, "About")
-        
-        # Text controls - Simplified
-        self.setCentralWidget(central_widget)
 
     def _ensure_config_dir(self):
         """Ensure the config directory exists"""
@@ -582,56 +584,34 @@ class MainWindow(QMainWindow):
     
     def populate_audio_devices(self):
         """Populate the audio devices dropdown"""
-        try:
-            device_list = sd.query_devices()
-            # Print device list for debugging
-            print("Available audio devices:")
-            for i, device in enumerate(device_list):
-                print(f"{i}: {device['name']} (inputs: {device['max_input_channels']})")
-            
-            # Get input devices with their indices
-            input_devices = []
-            for i, d in enumerate(device_list):
-                if d['max_input_channels'] > 0:
-                    input_devices.append((i, d['name']))
-            
-            # Store device indices for later use
-            self.device_indices = {name: idx for idx, name in input_devices}
-            
-            # Populate both combo boxes with device names only
-            device_names = [name for _, name in input_devices]
-            
-            # Check if combo boxes exist before populating
-            if hasattr(self, 'audio_device_combo') and self.audio_device_combo is not None:
-                try:
-                    self.audio_device_combo.clear()
-                except RuntimeError as e:
-                    print(f"Error populating audio devices: {e}")
-                    return
-                for name in device_names:
-                    self.audio_device_combo.addItem(name)
-                
-            if hasattr(self, 'default_audio_device_combo') and self.default_audio_device_combo is not None:
-                self.default_audio_device_combo.clear()
-                for name in device_names:
-                    self.default_audio_device_combo.addItem(name)
-                    
-            # Print selected devices for debugging
-            print(f"Device indices: {self.device_indices}")
-            print(f"Added {len(device_names)} devices to combo boxes")
-            
-            # Force update of combo box display
-            if hasattr(self, 'audio_device_combo') and self.audio_device_combo is not None:
-                self.audio_device_combo.update()
-                
-            if hasattr(self, 'default_audio_device_combo') and self.default_audio_device_combo is not None:
-                self.default_audio_device_combo.update()
-                
-        except Exception as e:
-            self.update_status(f"Error populating audio devices: {e}")
-            print(f"Error details: {str(e)}")
-            import traceback
-            traceback.print_exc()
+        # Clear existing items
+        self.audio_device_combo.clear()
+        if hasattr(self, 'audio_device_combo_settings'):
+            self.audio_device_combo_settings.clear()
+
+        print("Available audio devices:")
+        devices = sd.query_devices()
+        self.device_indices = {}
+        
+        for i, device in enumerate(devices):
+            print(f"{i}: {device['name']} (inputs: {device['max_input_channels']})")
+            # Only add devices that have input channels
+            if device['max_input_channels'] > 0:
+                self.device_indices[device['name']] = i
+                self.audio_device_combo.addItem(device['name'])
+                if hasattr(self, 'audio_device_combo_settings'):
+                    self.audio_device_combo_settings.addItem(device['name'])
+        
+        print("Device indices:", self.device_indices)
+        print(f"Added {len(self.device_indices)} devices to combo boxes")
+
+        # Set the default device if it exists in settings
+        if self.settings.get('default_device'):
+            default_device = self.settings['default_device']
+            if default_device in self.device_indices:
+                self.audio_device_combo.setCurrentText(default_device)
+                if hasattr(self, 'audio_device_combo_settings'):
+                    self.audio_device_combo_settings.setCurrentText(default_device)
 
     def save_audio_device(self):
         """Save the selected audio device"""
@@ -643,9 +623,9 @@ class MainWindow(QMainWindow):
     
     def save_default_audio_device(self):
         """Save the default audio device"""
-        device = self.default_audio_device_combo.currentText()
+        device = self.audio_device_combo_settings.currentText()
         if device:
-            self.settings['audio_device'] = device
+            self.settings['default_device'] = device
             self._save_settings()
             self.update_status(f"Audio device '{device}' saved as default device")
             
@@ -1034,6 +1014,59 @@ class MainWindow(QMainWindow):
         self.tray_icon.hide()
         QApplication.quit()
     
+    def _create_settings_tab(self):
+        """Create the Settings tab with audio device and API key settings"""
+        settings_tab = QWidget()
+        settings_layout = QVBoxLayout()
+        settings_tab.setLayout(settings_layout)
+
+        # Audio Device Settings
+        audio_group = QGroupBox("Audio Device Settings")
+        audio_layout = QFormLayout()
+        audio_group.setLayout(audio_layout)
+
+        # Device selection
+        self.audio_device_combo_settings = QComboBox()
+        audio_layout.addRow("Select Audio Device:", self.audio_device_combo_settings)
+
+        # Save device button
+        save_device_btn = QPushButton("Save Selected Device")
+        save_device_btn.clicked.connect(self.save_audio_device)
+        audio_layout.addRow("", save_device_btn)
+
+        # Set as default checkbox and button
+        default_layout = QHBoxLayout()
+        save_default_btn = QPushButton("Set as Default Device")
+        save_default_btn.clicked.connect(self.save_default_audio_device)
+        default_layout.addWidget(save_default_btn)
+        audio_layout.addRow("", default_layout)
+
+        settings_layout.addWidget(audio_group)
+
+        # API Key Settings
+        api_group = QGroupBox("API Key Settings")
+        api_layout = QFormLayout()
+        api_group.setLayout(api_layout)
+
+        # API Key input
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        if OPENAI_API_KEY:
+            self.api_key_input.setText(OPENAI_API_KEY)
+        api_layout.addRow("OpenAI API Key:", self.api_key_input)
+
+        # Save API key button
+        save_api_btn = QPushButton("Save API Key")
+        save_api_btn.clicked.connect(self.save_api_key)
+        api_layout.addRow("", save_api_btn)
+
+        settings_layout.addWidget(api_group)
+
+        # Add stretch to push everything to the top
+        settings_layout.addStretch()
+
+        return settings_tab
+
     def _create_about_tab(self):
         """Create the About tab with information about the application"""
         about_tab = QWidget()
