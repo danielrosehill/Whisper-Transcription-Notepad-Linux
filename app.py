@@ -551,6 +551,22 @@ class MainWindow(QMainWindow):
         self.text_edit = QTextEdit()
         main_layout.addWidget(self.text_edit)
         
+        # Text actions layout
+        text_actions_layout = QHBoxLayout()
+        
+        # Clear text button
+        self.clear_text_btn = QPushButton("Clear Text")
+        self.clear_text_btn.setIcon(QIcon.fromTheme("edit-clear", QIcon.fromTheme("edit-delete")))
+        self.clear_text_btn.setToolTip("Clear all text in the editor")
+        self.clear_text_btn.clicked.connect(self.clear_text)
+        text_actions_layout.addWidget(self.clear_text_btn)
+        
+        # Add spacer to push buttons to the left
+        text_actions_layout.addStretch()
+        
+        # Add text actions layout to main layout
+        main_layout.addLayout(text_actions_layout)
+        
         # Create settings tab
         settings_tab = self._create_settings_tab()
         self.tab_widget.addTab(settings_tab, "Settings")
