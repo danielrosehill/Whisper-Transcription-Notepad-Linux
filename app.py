@@ -16,12 +16,13 @@ import sounddevice as sd
 from scipy.io.wavfile import write
 from pydub import AudioSegment
 from dotenv import load_dotenv
+import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QComboBox, QTextEdit, QTabWidget, 
     QGroupBox, QFormLayout, QLineEdit, QFileDialog, QMessageBox,
     QCheckBox, QProgressBar, QSystemTrayIcon, QMenu, QAction,
-    QGridLayout, QStatusBar
+    QGridLayout, QStatusBar, QScrollArea
 )
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSettings, QDir, QFile, QIODevice
@@ -301,47 +302,110 @@ class TranscriptionWorker(QThread):
             return []
 
 
+class OptimizationWorker(QThread):
+    """Thread for handling OpenAI API text optimization"""
+    optimization_complete = pyqtSignal(str)
+    optimization_error = pyqtSignal(str)
+    update_status = pyqtSignal(str)
+    
+    def __init__(self, text, api_key):
+        super().__init__()
+        self.text = text
+        self.api_key = api_key
+        
+    def run(self):
+        """Start the optimization process"""
+        if not self.text:
+            self.optimization_error.emit("No text available for optimization")
+            return
+        
+        try:
+            self.update_status.emit("Sending text to OpenAI API for optimization...")
+            
+            # Use direct API call with requests to avoid proxies error
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            data = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant that improves text transcriptions. Your task is to correct typos, improve clarity, and format the text into proper paragraphs. Preserve the original meaning and content, but make it more readable."},
+                    {"role": "user", "content": f"Please optimize this transcription for readability:\n\n{self.text}"}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 4000
+            }
+            
+            response = requests.post(url, headers=headers, json=data)
+            
+            if response.status_code == 200:
+                response_data = response.json()
+                optimized_text = response_data['choices'][0]['message']['content']
+                
+                if optimized_text:
+                    self.optimization_complete.emit(optimized_text)
+                    self.update_status.emit("Text optimization completed successfully")
+                else:
+                    self.optimization_error.emit("No optimized text returned from API")
+            else:
+                error_msg = f"API Error: {response.status_code}, {response.text}"
+                print(error_msg)
+                self.optimization_error.emit(error_msg)
+                
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Optimization error: {str(e)}")
+            print(f"Error details:\n{error_details}")
+            self.optimization_error.emit(f"Error during optimization: {str(e)}")
+
+
 class MainWindow(QMainWindow):
     """Main application window"""
     def __init__(self):
         super().__init__()
         
+        # Initialize variables
+        self.recorder = AudioRecorder()
+        self.transcription_worker = None
+        self.optimization_worker = None
+        self.recording_timer = None
+        self.recording_seconds = 0
+        self.device_indices = {}
+        self.last_transcript = ""
+        self.continue_with_optimization = False
+        self.append_transcriptions = True
+        
         # Initialize settings
         self._ensure_config_dir()
         self.settings = self._load_settings()
         
-        # Initialize device indices mapping
-        self.device_indices = {}
-        
         # Initialize UI
         self.init_ui()
         
-        # Initialize audio recorder
-        self.recorder = AudioRecorder()
-        self.recorder.update_status.connect(self.update_status)
+        # Connect recorder signals
         self.recorder.update_volume.connect(self.update_volume_meter)
         self.recorder.update_timer.connect(self.update_timer)
+        self.recorder.update_status.connect(self.update_status)
         
-        # Initialize transcription worker
-        self.transcription_worker = None
-        
-        # Populate audio devices - do this after UI is initialized
+        # Populate audio devices
         self.populate_audio_devices()
         
-        # Set selected audio device if saved
-        if 'audio_device' in self.settings:
-            index = self.audio_device_combo.findText(self.settings['audio_device'])
-            if index >= 0:
-                self.audio_device_combo.setCurrentIndex(index)
-                
-            # Also set in the settings tab
-            index = self.default_audio_device_combo.findText(self.settings['audio_device'])
-            if index >= 0:
-                self.default_audio_device_combo.setCurrentIndex(index)
+        # Create a status bar
+        self.statusBar = QStatusBar()
+        self.setStatusBar(self.statusBar)
+        self.update_status("Ready")
         
-        # Set API key if saved
-        if 'api_key' in self.settings and self.api_key_input:
-            self.api_key_input.setText(self.settings['api_key'])
+        # Load settings
+        self.settings = self._load_settings()
+        
+        # Add logging to debug crash issue
+        import logging
+
+        logging.basicConfig(level=logging.DEBUG)
+        logging.debug("UI initialized")
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -370,22 +434,23 @@ class MainWindow(QMainWindow):
         audio_device_layout.addWidget(save_device_btn)
         main_tab_layout.addLayout(audio_device_layout)
         
-        # Recording controls and timer in a horizontal layout
-        recording_controls_layout = QHBoxLayout()
+        # Main controls section
+        controls_section = QHBoxLayout()
         
-        # Recording buttons in a vertical layout
-        recording_layout = QVBoxLayout()
+        # === AUDIO CONTROLS GROUP ===
+        audio_controls_group = QGroupBox("Audio Controls")
+        audio_controls_layout = QHBoxLayout()
         
-        # First row of buttons
-        buttons_row1 = QHBoxLayout()
+        # Record button
         self.record_btn = QPushButton()
         self.record_btn.setIcon(QIcon.fromTheme("media-record", QIcon.fromTheme("media-playback-start")))
         self.record_btn.setToolTip("Record")
         self.record_btn.clicked.connect(self.start_recording)
         self.record_btn.setMinimumHeight(40)
         self.record_btn.setMinimumWidth(40)
-        buttons_row1.addWidget(self.record_btn)
+        audio_controls_layout.addWidget(self.record_btn)
         
+        # Pause button
         self.pause_btn = QPushButton()
         self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
         self.pause_btn.setToolTip("Pause")
@@ -393,8 +458,9 @@ class MainWindow(QMainWindow):
         self.pause_btn.setEnabled(False)
         self.pause_btn.setMinimumHeight(40)
         self.pause_btn.setMinimumWidth(40)
-        buttons_row1.addWidget(self.pause_btn)
+        audio_controls_layout.addWidget(self.pause_btn)
         
+        # Stop button
         self.stop_btn = QPushButton()
         self.stop_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
         self.stop_btn.setToolTip("Stop")
@@ -402,12 +468,9 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setMinimumHeight(40)
         self.stop_btn.setMinimumWidth(40)
-        buttons_row1.addWidget(self.stop_btn)
+        audio_controls_layout.addWidget(self.stop_btn)
         
-        recording_layout.addLayout(buttons_row1)
-        
-        # Second row of buttons
-        buttons_row2 = QHBoxLayout()
+        # Clear button
         self.clear_btn = QPushButton()
         self.clear_btn.setIcon(QIcon.fromTheme("edit-clear", QIcon.fromTheme("edit-delete")))
         self.clear_btn.setToolTip("Clear")
@@ -415,56 +478,14 @@ class MainWindow(QMainWindow):
         self.clear_btn.setEnabled(False)
         self.clear_btn.setMinimumHeight(40)
         self.clear_btn.setMinimumWidth(40)
-        buttons_row2.addWidget(self.clear_btn)
+        audio_controls_layout.addWidget(self.clear_btn)
         
-        # Replace the transcribe button with a more descriptive one
-        self.transcribe_btn = QPushButton("Transcribe")
-        self.transcribe_btn.setIcon(QIcon.fromTheme("document-edit", QIcon.fromTheme("edit-paste")))
-        self.transcribe_btn.clicked.connect(self.transcribe_audio)
-        self.transcribe_btn.setEnabled(False)
-        self.transcribe_btn.setMinimumHeight(40)
-        buttons_row2.addWidget(self.transcribe_btn)
-        
-        # Replace Stop & Transcribe with a clearer button
-        self.stop_and_transcribe_btn = QPushButton("Transcribe Now")
-        self.stop_and_transcribe_btn.setIcon(QIcon.fromTheme("document-save", QIcon.fromTheme("document-send")))
-        self.stop_and_transcribe_btn.clicked.connect(self.stop_and_transcribe)
-        self.stop_and_transcribe_btn.setEnabled(False)
-        self.stop_and_transcribe_btn.setMinimumHeight(40)
-        buttons_row2.addWidget(self.stop_and_transcribe_btn)
-        
-        recording_layout.addLayout(buttons_row2)
-        
-        # Add recording controls to the left side
-        recording_controls_layout.addLayout(recording_layout, 7)
+        audio_controls_group.setLayout(audio_controls_layout)
+        controls_section.addWidget(audio_controls_group, 7)
         
         # Recording time display in a styled frame
         timer_frame = QGroupBox("Recording Time")
         timer_layout = QVBoxLayout()
-        
-        # Add volume meter
-        volume_layout = QHBoxLayout()
-        volume_layout.addWidget(QLabel("Volume:"))
-        self.volume_meter = QProgressBar()
-        self.volume_meter.setRange(0, 100)
-        self.volume_meter.setValue(0)
-        self.volume_meter.setTextVisible(False)
-        self.volume_meter.setMinimumWidth(150)
-        self.volume_meter.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                background: #f0f0f0;
-                height: 15px;
-            }
-            QProgressBar::chunk {
-                background-color: qlineargradient(x1: 0, y1: 0.5, x2: 1, y2: 0.5, 
-                                                 stop: 0 #0a0, stop: 0.6 #0f0, stop: 1 #f00);
-                border-radius: 5px;
-            }
-        """)
-        volume_layout.addWidget(self.volume_meter)
-        timer_layout.addLayout(volume_layout)
         
         # Add recording time label
         self.recording_time_label = QLabel("00:00")
@@ -479,15 +500,45 @@ class MainWindow(QMainWindow):
         timer_frame.setLayout(timer_layout)
         
         # Add timer to the right side
-        recording_controls_layout.addWidget(timer_frame, 3)
+        controls_section.addWidget(timer_frame, 3)
         
-        main_tab_layout.addLayout(recording_controls_layout)
+        main_tab_layout.addLayout(controls_section)
+        
+        # === ACTION BUTTONS GROUP ===
+        action_group = QGroupBox("Actions")
+        action_layout = QHBoxLayout()
+        
+        # Transcribe button
+        self.transcribe_btn = QPushButton("Transcribe")
+        self.transcribe_btn.setIcon(QIcon.fromTheme("document-edit", QIcon.fromTheme("edit-paste")))
+        self.transcribe_btn.clicked.connect(self.transcribe_audio)
+        self.transcribe_btn.setEnabled(False)
+        self.transcribe_btn.setMinimumHeight(40)
+        action_layout.addWidget(self.transcribe_btn)
+        
+        # AI Optimize button
+        self.optimize_btn = QPushButton("AI Optimize")
+        self.optimize_btn.setIcon(QIcon.fromTheme("edit-find-replace", QIcon.fromTheme("system-run")))
+        self.optimize_btn.clicked.connect(self.optimize_text)
+        self.optimize_btn.setMinimumHeight(40)
+        action_layout.addWidget(self.optimize_btn)
+        
+        # Transcribe & Optimize button (replacing both stop_and_transcribe and all_in_one buttons)
+        self.all_in_one_btn = QPushButton("Transcribe And Optimize")
+        self.all_in_one_btn.setIcon(QIcon.fromTheme("system-run", QIcon.fromTheme("emblem-default")))
+        self.all_in_one_btn.clicked.connect(self.stop_transcribe_and_optimize)
+        self.all_in_one_btn.setEnabled(True)
+        self.all_in_one_btn.setMinimumHeight(40)
+        action_layout.addWidget(self.all_in_one_btn)
+        
+        action_group.setLayout(action_layout)
+        main_tab_layout.addWidget(action_group)
         
         # Text area
         self.text_edit = QTextEdit()
         main_tab_layout.addWidget(self.text_edit)
         
-        # Text controls
+        # Text controls - Simplified to a single row
         text_controls_layout = QHBoxLayout()
         
         self.copy_btn = QPushButton("Copy to Clipboard")
@@ -723,9 +774,9 @@ class MainWindow(QMainWindow):
                     self.record_btn.setEnabled(False)
                     self.pause_btn.setEnabled(True)
                     self.stop_btn.setEnabled(True)
-                    self.stop_and_transcribe_btn.setEnabled(True)
                     self.clear_btn.setEnabled(False)
                     self.transcribe_btn.setEnabled(False)
+                    self.all_in_one_btn.setEnabled(True)  # Enable the all-in-one button
                 else:
                     self.update_status(f"Audio device '{device}' not found in device mapping")
                     print(f"Device '{device}' not found in mapping: {self.device_indices}")
@@ -735,56 +786,39 @@ class MainWindow(QMainWindow):
         else:
             self.update_status("No audio device selected")
 
-    def pause_recording(self):
-        """Pause or resume audio recording"""
-        if self.recorder.isRunning():
-            self.recorder.pause()
-            if self.recorder.paused:
-                self.pause_btn.setIcon(QIcon.fromTheme("media-playback-start"))
-                self.pause_btn.setToolTip("Resume")
-            else:
-                self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
-                self.pause_btn.setToolTip("Pause")
-    
     def stop_recording(self):
         """Stop audio recording"""
         if self.recorder.isRunning():
-            # Reset volume meter
-            self.volume_meter.setValue(0)
             self.recorder.stop()
             self.recorder.wait()
             self.record_btn.setEnabled(True)
             self.pause_btn.setEnabled(False)
-            self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
-            self.pause_btn.setToolTip("Pause")
             self.stop_btn.setEnabled(False)
-            self.stop_and_transcribe_btn.setEnabled(False)
             self.clear_btn.setEnabled(True)
             self.transcribe_btn.setEnabled(True)
-    
-    def stop_and_transcribe(self):
-        """Stop recording and immediately transcribe the audio"""
+            self.all_in_one_btn.setEnabled(True)
+            self.update_status("Recording stopped")
+            print("Recording stopped")
+
+    def pause_recording(self):
+        """Pause or resume audio recording"""
         if self.recorder.isRunning():
-            # Reset volume meter
-            self.volume_meter.setValue(0)
-            self.recorder.stop()
-            self.recorder.wait()
-            self.record_btn.setEnabled(True)
-            self.pause_btn.setEnabled(False)
-            self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
-            self.pause_btn.setToolTip("Pause")
-            self.stop_btn.setEnabled(False)
-            self.stop_and_transcribe_btn.setEnabled(False)
-            self.clear_btn.setEnabled(True)
-            self.transcribe_btn.setEnabled(True)
+            # Toggle pause state directly in the recorder
+            self.recorder.pause()
             
-            # Immediately start transcription
-            self.transcribe_audio()
-    
+            # Update UI based on the new pause state
+            if self.recorder.paused:
+                self.pause_btn.setIcon(QIcon.fromTheme("media-playback-start"))
+                self.pause_btn.setToolTip("Resume")
+                self.update_status("Recording paused...")
+            else:
+                self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
+                self.pause_btn.setToolTip("Pause")
+                self.update_status("Recording resumed...")
+
     def clear_recording(self):
         """Clear the current recording"""
         self.recorder.clear()
-        self.volume_meter.setValue(0)  # Reset volume meter
         self.clear_btn.setEnabled(False)
         self.transcribe_btn.setEnabled(False)
     
@@ -812,18 +846,26 @@ class MainWindow(QMainWindow):
     def handle_transcription_complete(self, transcript):
         """Handle completed transcription"""
         if transcript:
-            # Append to existing text with a separator if there's already text
-            if not self.text_edit.toPlainText().strip():
+            # Update the text editor with the transcribed text
+            if not self.append_transcriptions:
                 self.text_edit.setText(transcript)
             else:
                 current_text = self.text_edit.toPlainText()
                 self.text_edit.setText(f"{current_text}\n\n--- New Transcription ---\n\n{transcript}")
             
             self.update_status("Transcription completed successfully")
+            
+            # Store the last transcript for potential optimization
+            self.last_transcript = transcript
         else:
             self.update_status("Transcription completed but no text was returned")
         
         self.transcribe_btn.setEnabled(True)
+        
+        # If this was called from stop_transcribe_and_optimize, continue with optimization
+        if self.continue_with_optimization:
+            self.continue_with_optimization = False
+            self.optimize_text()
     
     def handle_transcription_error(self, error):
         """Handle transcription error"""
@@ -831,6 +873,71 @@ class MainWindow(QMainWindow):
         self.update_status(f"Transcription error: {error}")
         self.transcribe_btn.setEnabled(True)
     
+    def optimize_text(self):
+        """Optimize the text using OpenAI API"""
+        text = self.text_edit.toPlainText()
+        if not text:
+            self.update_status("No text to optimize")
+            return
+        
+        # Create and start the optimization worker
+        self.optimization_worker = OptimizationWorker(text, OPENAI_API_KEY)
+        self.optimization_worker.optimization_complete.connect(self.handle_optimization_complete)
+        self.optimization_worker.optimization_error.connect(self.handle_optimization_error)
+        self.optimization_worker.update_status.connect(self.update_status)
+        self.optimization_worker.start()
+        
+        self.optimize_btn.setEnabled(False)
+        self.update_status("Text optimization started...")
+    
+    def handle_optimization_complete(self, optimized_text):
+        """Handle completed text optimization"""
+        if optimized_text:
+            # Replace the text with the optimized version
+            self.text_edit.setText(optimized_text)
+            self.update_status("Text optimization completed successfully")
+        else:
+            self.update_status("Optimization completed but no text was returned")
+        
+        self.optimize_btn.setEnabled(True)
+    
+    def handle_optimization_error(self, error):
+        """Handle optimization error"""
+        QMessageBox.critical(self, "Optimization Error", error)
+        self.update_status(f"Optimization error: {error}")
+        self.optimize_btn.setEnabled(True)
+    
+    def stop_transcribe_and_optimize(self):
+        """Stop recording, transcribe, and optimize the text"""
+        if self.recorder.isRunning():
+            # First stop the recording
+            self.recorder.stop()
+            self.recorder.wait()
+            self.record_btn.setEnabled(True)
+            self.pause_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+            self.clear_btn.setEnabled(True)
+            self.transcribe_btn.setEnabled(True)
+            self.all_in_one_btn.setEnabled(True)
+            
+            # Then transcribe and optimize
+            self.update_status("Transcribing and optimizing...")
+            self.continue_with_optimization = True
+            self.transcribe_audio()
+        else:
+            # Check if there's a recording available
+            audio_file = self.recorder.get_audio_file()
+            if audio_file and os.path.exists(audio_file):
+                # If there's a recording, transcribe and optimize it
+                self.update_status("Transcribing and optimizing existing recording...")
+                self.continue_with_optimization = True
+                self.transcribe_audio()
+            elif self.text_edit.toPlainText():
+                # If there's text in the editor but no recording, just optimize the text
+                self.optimize_text()
+            else:
+                self.update_status("No recording or text available to process")
+
     def copy_to_clipboard(self):
         """Copy text to clipboard"""
         text = self.text_edit.toPlainText()
@@ -893,7 +1000,10 @@ class MainWindow(QMainWindow):
 
     def update_status(self, message):
         """Update status bar with message"""
-        self.status_bar.showMessage(message)
+        if self.statusBar:  # Access status bar as a property
+            self.statusBar.showMessage(message)
+        else:
+            logging.warning("Attempted to update status bar after it was deleted")
         print(message)  # Also print to console for debugging
     
     def update_timer(self, seconds):
@@ -911,48 +1021,8 @@ class MainWindow(QMainWindow):
         
     def update_volume_meter(self, level):
         """Update volume meter with current audio level"""
-        self.volume_meter.setValue(int(level))
-        
-        # Change color based on volume level
-        if level > 80:  # High volume
-            self.volume_meter.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #ccc;
-                    border-radius: 5px;
-                    background: #f0f0f0;
-                    height: 15px;
-                }
-                QProgressBar::chunk {
-                    background-color: #f00;
-                    border-radius: 5px;
-                }
-            """)
-        elif level > 40:  # Medium volume
-            self.volume_meter.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #ccc;
-                    border-radius: 5px;
-                    background: #f0f0f0;
-                    height: 15px;
-                }
-                QProgressBar::chunk {
-                    background-color: #ff0;
-                    border-radius: 5px;
-                }
-            """)
-        else:  # Low volume
-            self.volume_meter.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #ccc;
-                    border-radius: 5px;
-                    background: #f0f0f0;
-                    height: 15px;
-                }
-                QProgressBar::chunk {
-                    background-color: #0a0;
-                    border-radius: 5px;
-                }
-            """)
+        # Function kept for compatibility, but volume meter UI element has been removed
+        pass
 
     def closeEvent(self, event: QCloseEvent):
         """Override close event to minimize to tray instead of closing"""
@@ -1050,65 +1120,66 @@ class MainWindow(QMainWindow):
     def _create_about_tab(self):
         """Create the About tab with information about the application"""
         about_tab = QWidget()
-        about_layout = QVBoxLayout()
+        about_layout = QVBoxLayout(about_tab)
         
-        # Title
+        # Application title
         title_label = QLabel("Linux Cloud STT Notepad")
-        title_label.setStyleSheet("font-size: 18pt; font-weight: bold;")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold;")
         title_label.setAlignment(Qt.AlignCenter)
-        
-        # Description
-        desc_label = QLabel(
-            "A simple notepad application with speech-to-text capabilities using OpenAI's Whisper API."
-        )
-        desc_label.setWordWrap(True)
-        desc_label.setAlignment(Qt.AlignCenter)
-        
-        # Instructions
-        instructions = QLabel(
-            "<h3>Instructions:</h3>"
-            "<ol>"
-            "<li><b>Recording Audio:</b>"
-            "<ul>"
-            "<li>Select your audio input device from the dropdown menu</li>"
-            "<li>Click 'Start Recording' to begin capturing audio</li>"
-            "<li>Click 'Stop Recording' when you're finished</li>"
-            "</ul></li>"
-            "<li><b>Transcription:</b>"
-            "<ul>"
-            "<li>After recording, click 'Transcribe' to convert your speech to text</li>"
-            "<li>The application can handle recordings up to 1 hour in length</li>"
-            "<li>For longer recordings, the audio will be automatically split into chunks and transcribed separately</li>"
-            "</ul></li>"
-            "<li><b>Editing Text:</b>"
-            "<ul>"
-            "<li>The transcribed text will appear in the text editor</li>"
-            "<li>You can edit, copy, paste, and save the text as needed</li>"
-            "</ul></li>"
-            "<li><b>Saving:</b>"
-            "<ul>"
-            "<li>Click 'Save' to save your text to a file</li>"
-            "<li>Click 'Open' to load text from an existing file</li>"
-            "</ul></li>"
-            "</ol>"
-            "<p><b>Note:</b> This application requires an OpenAI API key to be set in a .env file for transcription.</p>"
-        )
-        instructions.setWordWrap(True)
-        instructions.setTextFormat(Qt.RichText)
-        
-        # Version
-        version_label = QLabel("Version: 1.0.0")
-        version_label.setAlignment(Qt.AlignCenter)
-        
-        # Add all widgets to layout
         about_layout.addWidget(title_label)
-        about_layout.addWidget(desc_label)
-        about_layout.addSpacing(20)
-        about_layout.addWidget(instructions)
-        about_layout.addStretch(1)
+        
+        # Version info
+        version_label = QLabel("Version 1.0.0")
+        version_label.setAlignment(Qt.AlignCenter)
         about_layout.addWidget(version_label)
         
-        about_tab.setLayout(about_layout)
+        # Description
+        description_text = """
+        <p>A minimalist notepad with speech-to-text capabilities using the OpenAI API for Linux desktop environments.</p>
+        
+        <h3>Features:</h3>
+        <ul>
+            <li><b>Audio Recording:</b> Record audio from any connected input device</li>
+            <li><b>Speech-to-Text:</b> Transcribe recorded audio using OpenAI's Whisper API</li>
+            <li><b>AI Optimization:</b> Clean and improve transcribed text by correcting typos, improving clarity, and formatting into proper paragraphs</li>
+            <li><b>Text Editing:</b> Edit transcribed text directly in the application</li>
+            <li><b>Export:</b> Save your notes as Markdown files</li>
+        </ul>
+        
+        <h3>Button Functions:</h3>
+        <ul>
+            <li><b>Audio Controls:</b>
+                <ul>
+                    <li><b>Record:</b> Start audio recording</li>
+                    <li><b>Pause/Resume:</b> Pause or resume recording</li>
+                    <li><b>Stop:</b> Stop recording</li>
+                    <li><b>Clear:</b> Clear the current recording</li>
+                </ul>
+            </li>
+            <li><b>Actions:</b>
+                <ul>
+                    <li><b>Transcribe:</b> Convert recorded audio to text</li>
+                    <li><b>AI Optimize:</b> Improve the quality and formatting of transcribed text using AI</li>
+                    <li><b>Transcribe & Optimize:</b> Stop recording, transcribe, and optimize in one sequence</li>
+                </ul>
+            </li>
+        </ul>
+        
+        <p>This application requires an OpenAI API key to function properly.</p>
+        <p>&copy; 2023-2025 Daniel Rosehill</p>
+        """
+        
+        description_label = QLabel(description_text)
+        description_label.setWordWrap(True)
+        description_label.setOpenExternalLinks(True)
+        description_label.setTextFormat(Qt.RichText)
+        
+        # Add description to a scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(description_label)
+        about_layout.addWidget(scroll_area)
+        
         return about_tab
 
 
