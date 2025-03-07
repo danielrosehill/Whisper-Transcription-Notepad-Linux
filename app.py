@@ -382,8 +382,15 @@ class MainWindow(QMainWindow):
         self._ensure_config_dir()
         self.settings = self._load_settings()
         
+        # Create and set up the status bar before initializing the UI
+        self.myStatusBar = QStatusBar()
+        self.setStatusBar(self.myStatusBar)
+        
         # Initialize UI
         self.init_ui()
+        
+        # Create system tray icon
+        self.create_tray_icon()
         
         # Connect recorder signals
         self.recorder.update_volume.connect(self.update_volume_meter)
@@ -393,19 +400,10 @@ class MainWindow(QMainWindow):
         # Populate audio devices
         self.populate_audio_devices()
         
-        # Create a status bar
-        self.statusBar = QStatusBar()
-        self.setStatusBar(self.statusBar)
-        self.update_status("Ready")
-        
         # Load settings
         self.settings = self._load_settings()
-        
-        # Add logging to debug crash issue
-        import logging
+        self.update_status("Ready")
 
-        logging.basicConfig(level=logging.DEBUG)
-        logging.debug("UI initialized")
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -430,6 +428,7 @@ class MainWindow(QMainWindow):
         self.audio_device_combo = QComboBox()
         audio_device_layout.addWidget(self.audio_device_combo)
         save_device_btn = QPushButton("Save")
+        save_device_btn.setToolTip("Save selected audio device")
         save_device_btn.clicked.connect(self.save_audio_device)
         audio_device_layout.addWidget(save_device_btn)
         main_tab_layout.addLayout(audio_device_layout)
@@ -442,42 +441,46 @@ class MainWindow(QMainWindow):
         audio_controls_layout = QHBoxLayout()
         
         # Record button
-        self.record_btn = QPushButton()
+        self.record_btn = QPushButton("Record")
         self.record_btn.setIcon(QIcon.fromTheme("media-record", QIcon.fromTheme("media-playback-start")))
-        self.record_btn.setToolTip("Record")
+        self.record_btn.setToolTip("Start recording audio")
+        self.record_btn.setStyleSheet("background-color: red; color: white;")
         self.record_btn.clicked.connect(self.start_recording)
         self.record_btn.setMinimumHeight(40)
-        self.record_btn.setMinimumWidth(40)
+        self.record_btn.setMinimumWidth(80)
         audio_controls_layout.addWidget(self.record_btn)
         
         # Pause button
-        self.pause_btn = QPushButton()
+        self.pause_btn = QPushButton("Pause")
         self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
-        self.pause_btn.setToolTip("Pause")
+        self.pause_btn.setToolTip("Pause recording")
+        self.pause_btn.setStyleSheet("background-color: yellow; color: black;")
         self.pause_btn.clicked.connect(self.pause_recording)
         self.pause_btn.setEnabled(False)
         self.pause_btn.setMinimumHeight(40)
-        self.pause_btn.setMinimumWidth(40)
+        self.pause_btn.setMinimumWidth(80)
         audio_controls_layout.addWidget(self.pause_btn)
         
         # Stop button
-        self.stop_btn = QPushButton()
+        self.stop_btn = QPushButton("Stop")
         self.stop_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
-        self.stop_btn.setToolTip("Stop")
+        self.stop_btn.setToolTip("Stop recording")
+        self.stop_btn.setStyleSheet("background-color: gray; color: white;")
         self.stop_btn.clicked.connect(self.stop_recording)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setMinimumHeight(40)
-        self.stop_btn.setMinimumWidth(40)
+        self.stop_btn.setMinimumWidth(80)
         audio_controls_layout.addWidget(self.stop_btn)
         
         # Clear button
-        self.clear_btn = QPushButton()
+        self.clear_btn = QPushButton("Clear")
         self.clear_btn.setIcon(QIcon.fromTheme("edit-clear", QIcon.fromTheme("edit-delete")))
-        self.clear_btn.setToolTip("Clear")
+        self.clear_btn.setToolTip("Clear recording")
+        self.clear_btn.setStyleSheet("background-color: lightgray; color: black;")
         self.clear_btn.clicked.connect(self.clear_recording)
         self.clear_btn.setEnabled(False)
         self.clear_btn.setMinimumHeight(40)
-        self.clear_btn.setMinimumWidth(40)
+        self.clear_btn.setMinimumWidth(80)
         audio_controls_layout.addWidget(self.clear_btn)
         
         audio_controls_group.setLayout(audio_controls_layout)
@@ -511,24 +514,30 @@ class MainWindow(QMainWindow):
         # Transcribe button
         self.transcribe_btn = QPushButton("Transcribe")
         self.transcribe_btn.setIcon(QIcon.fromTheme("document-edit", QIcon.fromTheme("edit-paste")))
-        self.transcribe_btn.clicked.connect(self.transcribe_audio)
+        self.transcribe_btn.setToolTip("Transcribe recorded audio")
         self.transcribe_btn.setEnabled(False)
         self.transcribe_btn.setMinimumHeight(40)
+        self.transcribe_btn.setMinimumWidth(120)
+        self.transcribe_btn.clicked.connect(self.transcribe_audio)
         action_layout.addWidget(self.transcribe_btn)
         
         # AI Optimize button
         self.optimize_btn = QPushButton("AI Optimize")
         self.optimize_btn.setIcon(QIcon.fromTheme("edit-find-replace", QIcon.fromTheme("system-run")))
-        self.optimize_btn.clicked.connect(self.optimize_text)
+        self.optimize_btn.setToolTip("Optimize transcription with AI")
         self.optimize_btn.setMinimumHeight(40)
+        self.optimize_btn.setMinimumWidth(120)
+        self.optimize_btn.clicked.connect(self.optimize_text)
         action_layout.addWidget(self.optimize_btn)
         
-        # Transcribe & Optimize button (replacing both stop_and_transcribe and all_in_one buttons)
-        self.all_in_one_btn = QPushButton("Transcribe And Optimize")
+        # Transcribe & Optimize button
+        self.all_in_one_btn = QPushButton("Transcribe And Optimise")
         self.all_in_one_btn.setIcon(QIcon.fromTheme("system-run", QIcon.fromTheme("emblem-default")))
-        self.all_in_one_btn.clicked.connect(self.stop_transcribe_and_optimize)
+        self.all_in_one_btn.setToolTip("Transcribe and optimize audio in one step")
         self.all_in_one_btn.setEnabled(True)
         self.all_in_one_btn.setMinimumHeight(40)
+        self.all_in_one_btn.setMinimumWidth(160)
+        self.all_in_one_btn.clicked.connect(self.stop_transcribe_and_optimize)
         action_layout.addWidget(self.all_in_one_btn)
         
         action_group.setLayout(action_layout)
@@ -538,112 +547,16 @@ class MainWindow(QMainWindow):
         self.text_edit = QTextEdit()
         main_tab_layout.addWidget(self.text_edit)
         
-        # Text controls - Simplified to a single row
-        text_controls_layout = QHBoxLayout()
-        
-        self.copy_btn = QPushButton("Copy to Clipboard")
-        self.copy_btn.setIcon(QIcon.fromTheme("edit-copy"))
-        self.copy_btn.clicked.connect(self.copy_to_clipboard)
-        text_controls_layout.addWidget(self.copy_btn)
-        
-        # Add clear text button
-        self.clear_text_btn = QPushButton("Clear Text")
-        self.clear_text_btn.setIcon(QIcon.fromTheme("edit-clear"))
-        self.clear_text_btn.clicked.connect(self.clear_text)
-        text_controls_layout.addWidget(self.clear_text_btn)
-        
-        self.download_btn = QPushButton("Download as Markdown")
-        self.download_btn.setIcon(QIcon.fromTheme("document-save"))
-        self.download_btn.clicked.connect(self.download_as_markdown)
-        text_controls_layout.addWidget(self.download_btn)
-        
-        main_tab_layout.addLayout(text_controls_layout)
-        
         # Add main tab to tab widget
-        self.tab_widget.addTab(main_tab, "Notepad")
+        self.tab_widget.addTab(main_tab, "Main")
         
-        # Create settings tab
-        settings_tab = QWidget()
-        settings_layout = QVBoxLayout(settings_tab)
-        
-        # API Key settings
-        api_key_group = QGroupBox("API Key Settings")
-        api_key_layout = QGridLayout()
-        
-        api_key_layout.addWidget(QLabel("OpenAI API Key:"), 0, 0)
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("Enter your OpenAI API key")
-        api_key_layout.addWidget(self.api_key_input, 0, 1)
-        
-        self.save_api_key_btn = QPushButton("Save API Key")
-        self.save_api_key_btn.setIcon(QIcon.fromTheme("document-save"))
-        self.save_api_key_btn.clicked.connect(self.save_api_key)
-        api_key_layout.addWidget(self.save_api_key_btn, 0, 2)
-        
-        api_key_group.setLayout(api_key_layout)
-        settings_layout.addWidget(api_key_group)
-        
-        # Default audio device settings
-        audio_device_group = QGroupBox("Default Audio Device")
-        audio_device_settings_layout = QGridLayout()
-        
-        audio_device_settings_layout.addWidget(QLabel("Default Audio Source:"), 0, 0)
-        self.default_audio_device_combo = QComboBox()
-        audio_device_settings_layout.addWidget(self.default_audio_device_combo, 0, 1)
-        
-        self.save_default_audio_btn = QPushButton("Save as Default")
-        self.save_default_audio_btn.setIcon(QIcon.fromTheme("document-save"))
-        self.save_default_audio_btn.clicked.connect(self.save_default_audio_device)
-        audio_device_settings_layout.addWidget(self.save_default_audio_btn, 0, 2)
-        
-        audio_device_group.setLayout(audio_device_settings_layout)
-        settings_layout.addWidget(audio_device_group)
-        
-        # Application Settings Group
-        app_group = QGroupBox("Application Settings")
-        app_layout = QFormLayout()
-        
-        # Add minimize to tray checkbox
-        self.minimize_to_tray_checkbox = QCheckBox("Minimize to system tray when closed")
-        self.minimize_to_tray_checkbox.setChecked(self.settings.get("minimize_to_tray", True))
-        self.minimize_to_tray_checkbox.stateChanged.connect(self._save_app_settings)
-        app_layout.addRow(self.minimize_to_tray_checkbox)
-        
-        app_group.setLayout(app_layout)
-        settings_layout.addWidget(app_group)
-        
-        # Config file location
-        config_group = QGroupBox("Configuration Information")
-        config_layout = QVBoxLayout()
-        
-        config_layout.addWidget(QLabel(f"Configuration Directory: {CONFIG_DIR}"))
-        config_layout.addWidget(QLabel(f"Settings File: {CONFIG_FILE}"))
-        
-        config_group.setLayout(config_layout)
-        settings_layout.addWidget(config_group)
-        
-        # Add spacer to push everything to the top
-        settings_layout.addStretch()
-        
-        settings_tab.setLayout(settings_layout)
-        self.tab_widget.addTab(settings_tab, "Settings")
-        
-        # Create About tab
+        # Add about tab
         about_tab = self._create_about_tab()
         self.tab_widget.addTab(about_tab, "About")
         
-        # Set central widget
+        # Text controls - Simplified
         self.setCentralWidget(central_widget)
-        
-        # Status bar
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready")
-        
-        # Create system tray icon
-        self.create_tray_icon()
-    
+
     def _ensure_config_dir(self):
         """Ensure the config directory exists"""
         if not os.path.exists(CONFIG_DIR):
@@ -690,7 +603,11 @@ class MainWindow(QMainWindow):
             
             # Check if combo boxes exist before populating
             if hasattr(self, 'audio_device_combo') and self.audio_device_combo is not None:
-                self.audio_device_combo.clear()
+                try:
+                    self.audio_device_combo.clear()
+                except RuntimeError as e:
+                    print(f"Error populating audio devices: {e}")
+                    return
                 for name in device_names:
                     self.audio_device_combo.addItem(name)
                 
@@ -756,7 +673,7 @@ class MainWindow(QMainWindow):
         """Save application settings"""
         self.settings["minimize_to_tray"] = self.minimize_to_tray_checkbox.isChecked()
         self._save_settings()
-        self.status_bar.showMessage("Application settings saved", 3000)
+        self.statusBar.showMessage("Application settings saved", 3000)
 
     def start_recording(self):
         """Start audio recording"""
@@ -838,7 +755,7 @@ class MainWindow(QMainWindow):
         
         self.transcribe_btn.setEnabled(False)
         self.update_status("Transcription started...")
-
+    
     def handle_transcription_progress(self, current, total):
         """Handle transcription progress updates"""
         self.update_status(f"Transcribing chunk {current} of {total}...")
@@ -1000,12 +917,12 @@ class MainWindow(QMainWindow):
 
     def update_status(self, message):
         """Update status bar with message"""
-        if self.statusBar:  # Access status bar as a property
-            self.statusBar.showMessage(message)
+        if self.myStatusBar:
+            self.myStatusBar.showMessage(message)
         else:
-            logging.warning("Attempted to update status bar after it was deleted")
-        print(message)  # Also print to console for debugging
-    
+            print("Attempted to update status bar after it was deleted")
+        print(message)  
+
     def update_timer(self, seconds):
         """Update recording time display"""
         minutes, secs = divmod(seconds, 60)
