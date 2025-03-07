@@ -12,6 +12,7 @@ A minimalist notepad application for Linux with speech-to-text capabilities usin
 - Copy text to clipboard
 - Save transcriptions as Markdown files
 - Persistent settings between sessions
+- System tray integration for background operation
 
 ## Requirements
 
@@ -76,6 +77,12 @@ A minimalist notepad application for Linux with speech-to-text capabilities usin
    - Copy the text to clipboard
    - Download the text as a Markdown file
 
+5. System Tray:
+   - The application minimizes to the system tray when closed
+   - Double-click the tray icon to show/hide the application
+   - Right-click the tray icon for a menu with Show, Hide, and Exit options
+   - This behavior can be toggled in the Settings tab
+
 ## Configuration
 
 The application stores your settings in `~/.config/linux-cloud-stt-notepad/settings.json`.
@@ -88,3 +95,22 @@ The application stores your settings in `~/.config/linux-cloud-stt-notepad/setti
 
 - Speech-to-text powered by [OpenAI's Whisper model](https://platform.openai.com/docs/guides/speech-to-text)
 - Built with PyQt5
+
+## Changelog
+
+### March 7, 2025
+
+- **Added**: System tray integration with microphone icon
+- **Added**: Option to minimize to tray when closing the application
+- **Fixed**: Resolved the "proxies" error during OpenAI client initialization by implementing a direct API request approach
+- **Improved**: Added support for transcribing longer recordings (up to 1 hour without chunking)
+- **Enhanced**: Implemented automatic chunking for recordings longer than 1 hour
+- **Added**: Detailed instructions in the About tab
+- **Updated**: Improved error handling and reporting during transcription
+
+### Initial Release
+
+- Basic recording functionality
+- Transcription using OpenAI's Whisper API
+- Text editing and saving capabilities
+- Settings persistence

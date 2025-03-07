@@ -8,25 +8,27 @@ import sys
 import os
 import json
 import time
-import tempfile
-import datetime
-import base64
-import sounddevice as sd
-import numpy as np
 import math
-import requests
-from scipy.io.wavfile import write as write_wav
+import tempfile
+import shutil
+import numpy as np
+import sounddevice as sd
+from scipy.io.wavfile import write
 from pydub import AudioSegment
-import ffmpeg
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QComboBox, QLabel, QTextEdit, QFileDialog,
-    QMessageBox, QStatusBar, QAction, QToolBar, QSplitter, QProgressBar,
-    QTabWidget, QLineEdit, QGridLayout, QGroupBox
-)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QDir, QTimer
-from PyQt5.QtGui import QIcon, QClipboard, QColor
 from dotenv import load_dotenv
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QLabel, QPushButton, QComboBox, QTextEdit, QTabWidget, 
+    QGroupBox, QFormLayout, QLineEdit, QFileDialog, QMessageBox,
+    QCheckBox, QProgressBar, QSystemTrayIcon, QMenu, QAction,
+    QGridLayout, QStatusBar
+)
+from PyQt5.QtCore import (
+    Qt, QThread, pyqtSignal, QTimer, QSettings, QDir, QFile, QIODevice
+)
+from PyQt5.QtGui import QIcon, QTextCursor, QCloseEvent
+import base64
+import requests
 from openai import OpenAI
 
 # Load environment variables from .env file
@@ -37,9 +39,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     print("Error: OPENAI_API_KEY not found in .env file")
     sys.exit(1)
-
-# Configure OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Constants
 SAMPLE_RATE = 44100  # Sample rate for audio recording
@@ -93,7 +92,7 @@ class AudioRecorder(QThread):
             # First save as WAV (temporary)
             temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
             audio_array = np.concatenate(self.audio_data, axis=0)
-            write_wav(temp_wav.name, self.sample_rate, audio_array)
+            write(temp_wav.name, self.sample_rate, audio_array)
             
             # Convert WAV to MP3 using pydub (much smaller file size)
             self.temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
@@ -174,7 +173,7 @@ class TranscriptionWorker(QThread):
         super().__init__()
         self.audio_file = audio_file
         self.api_key = api_key
-        self.max_chunk_duration = 300  # 5 minutes per chunk in seconds
+        self.max_chunk_duration = 3600  # 1 hour per chunk in seconds
         self.chunk_overlap = 5  # 5 seconds overlap between chunks
         
     def run(self):
@@ -185,20 +184,15 @@ class TranscriptionWorker(QThread):
         
         try:
             self.update_status.emit("Preparing audio for OpenAI API...")
-            # Initialize OpenAI client with explicit proxy settings
-            client = OpenAI(
-                api_key=self.api_key,
-                http_client=requests.Session()
-            )
             
             # Check audio duration
-            audio = AudioSegment.from_file(self.audio_file)  # Line 191
+            audio = AudioSegment.from_file(self.audio_file)
             duration_seconds = len(audio) / 1000  # pydub uses milliseconds
             
             # If audio is short enough, transcribe directly
             if duration_seconds <= self.max_chunk_duration:
                 self.update_status.emit("Sending request to OpenAI API...")
-                transcript = self._transcribe_file(client, self.audio_file)
+                transcript = self._transcribe_file(self.audio_file)
                 if transcript:
                     self.transcription_complete.emit(transcript)
                     self.update_status.emit("Transcription completed successfully")
@@ -207,7 +201,7 @@ class TranscriptionWorker(QThread):
             else:
                 # For longer audio, split into chunks and transcribe each
                 self.update_status.emit(f"Audio duration: {duration_seconds:.1f} seconds. Splitting into chunks...")
-                transcripts = self._transcribe_long_audio(client, audio, duration_seconds)
+                transcripts = self._transcribe_long_audio(audio, duration_seconds)
                 if transcripts:
                     # Combine all transcripts
                     full_transcript = " ".join(transcripts)
@@ -223,40 +217,45 @@ class TranscriptionWorker(QThread):
             print(f"Error details:\n{error_details}")
             self.transcription_error.emit(f"Error during transcription: {str(e)}")
     
-    def _transcribe_file(self, client, file_path):
+    def _transcribe_file(self, file_path):
         """Transcribe a single audio file using the OpenAI API"""
         try:
-            # Following the documentation example
+            # Directly use the API without the client object to avoid proxies error
+            import requests
+            
+            url = "https://api.openai.com/v1/audio/transcriptions"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}"
+            }
+            
             with open(file_path, "rb") as audio_file:
-                # Use the OpenAI API to transcribe the audio
-                response = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    response_format="text"  # Explicitly request text format
-                )
-                print(f"API response type: {type(response)}")
+                files = {
+                    "file": ("audio.mp3", audio_file, "audio/mpeg"),
+                    "model": (None, "whisper-1"),
+                    "response_format": (None, "text")
+                }
                 
-            # Check if response has text attribute
-            if hasattr(response, 'text'):
-                return response.text
-            elif isinstance(response, str):
-                return response
-            elif response is not None:  # Log the raw response if it's not None and not text
-                print(f"Raw API response: {response}")
-            else:
-                print(f"Unexpected response format: {response}")  # Line 239
-                return None
+                self.update_status.emit("Sending request to OpenAI API...")
+                response = requests.post(url, headers=headers, files=files)
+                
+                if response.status_code == 200:
+                    return response.text
+                else:
+                    error_msg = f"API Error: {response.status_code}, {response.text}"
+                    print(error_msg)
+                    self.update_status.emit(error_msg)
+                    return None
                 
         except Exception as e:
             error_msg = f"Error transcribing file: {str(e)}"
             self.update_status.emit(error_msg)
-            print(f"File path for transcription: {file_path}")  # Print file path in case of error
+            print(f"File path for transcription: {file_path}")
             print(f"Transcription error details: {error_msg}")
-            import traceback  # Line 246
+            import traceback
             traceback.print_exc()
             return None
             
-    def _transcribe_long_audio(self, client, audio, duration_seconds):
+    def _transcribe_long_audio(self, audio, duration_seconds):
         """Split long audio into chunks and transcribe each chunk"""
         try:
             # Calculate number of chunks needed
@@ -285,7 +284,7 @@ class TranscriptionWorker(QThread):
                 
                 # Transcribe chunk
                 self.update_status.emit(f"Transcribing chunk {i+1} of {num_chunks}...")
-                transcript = self._transcribe_file(client, chunk_file)
+                transcript = self._transcribe_file(chunk_file)
                 if transcript:
                     transcripts.append(transcript)
             
@@ -297,6 +296,8 @@ class TranscriptionWorker(QThread):
             return transcripts
         except Exception as e:
             self.update_status.emit(f"Error processing long audio: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
 
 
@@ -548,6 +549,19 @@ class MainWindow(QMainWindow):
         audio_device_group.setLayout(audio_device_settings_layout)
         settings_layout.addWidget(audio_device_group)
         
+        # Application Settings Group
+        app_group = QGroupBox("Application Settings")
+        app_layout = QFormLayout()
+        
+        # Add minimize to tray checkbox
+        self.minimize_to_tray_checkbox = QCheckBox("Minimize to system tray when closed")
+        self.minimize_to_tray_checkbox.setChecked(self.settings.get("minimize_to_tray", True))
+        self.minimize_to_tray_checkbox.stateChanged.connect(self._save_app_settings)
+        app_layout.addRow(self.minimize_to_tray_checkbox)
+        
+        app_group.setLayout(app_layout)
+        settings_layout.addWidget(app_group)
+        
         # Config file location
         config_group = QGroupBox("Configuration Information")
         config_layout = QVBoxLayout()
@@ -561,52 +575,11 @@ class MainWindow(QMainWindow):
         # Add spacer to push everything to the top
         settings_layout.addStretch()
         
-        # Add settings tab to tab widget
+        settings_tab.setLayout(settings_layout)
         self.tab_widget.addTab(settings_tab, "Settings")
         
         # Create About tab
-        about_tab = QWidget()
-        about_layout = QVBoxLayout(about_tab)
-        
-        # Title and version
-        title_label = QLabel("V1 Linux Desktop STT")
-        title_label.setStyleSheet("font-size: 24px; font-weight: bold;")
-        title_label.setAlignment(Qt.AlignCenter)
-        about_layout.addWidget(title_label)
-        
-        # Description
-        description_label = QLabel(
-            "This application uses the OpenAI Whisper AI to transcribe audio. "
-            "It was created because most STT apps for Linux focus on locally hosted "
-            "Whisper models, and some people much prefer using them via API."
-        )
-        description_label.setWordWrap(True)
-        description_label.setStyleSheet("font-size: 14px; margin: 20px;")
-        description_label.setAlignment(Qt.AlignCenter)
-        about_layout.addWidget(description_label)
-        
-        # Credits
-        credits_group = QGroupBox("Credits")
-        credits_layout = QVBoxLayout()
-        
-        credits_text = QLabel(
-            "<b>Development by:</b> Sonnet 3.7<br>"
-            "<b>Idea and Human In The Loop:</b> Daniel Rosehill<br><br>"
-            "<b>Website:</b> <a href='https://danielrosehill.com'>danielrosehill.com</a>"
-        )
-        credits_text.setTextFormat(Qt.RichText)
-        credits_text.setOpenExternalLinks(True)
-        credits_text.setAlignment(Qt.AlignCenter)
-        credits_text.setStyleSheet("font-size: 14px;")
-        credits_layout.addWidget(credits_text)
-        
-        credits_group.setLayout(credits_layout)
-        about_layout.addWidget(credits_group)
-        
-        # Add spacer to push content to the top
-        about_layout.addStretch()
-        
-        # Add About tab to tab widget
+        about_tab = self._create_about_tab()
         self.tab_widget.addTab(about_tab, "About")
         
         # Set central widget
@@ -616,7 +589,10 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
-
+        
+        # Create system tray icon
+        self.create_tray_icon()
+    
     def _ensure_config_dir(self):
         """Ensure the config directory exists"""
         if not os.path.exists(CONFIG_DIR):
@@ -724,6 +700,12 @@ class MainWindow(QMainWindow):
             self.update_status("API key saved")
         else:
             self.update_status("API key cannot be empty")
+
+    def _save_app_settings(self):
+        """Save application settings"""
+        self.settings["minimize_to_tray"] = self.minimize_to_tray_checkbox.isChecked()
+        self._save_settings()
+        self.status_bar.showMessage("Application settings saved", 3000)
 
     def start_recording(self):
         """Start audio recording"""
@@ -972,33 +954,162 @@ class MainWindow(QMainWindow):
                 }
             """)
 
-    def closeEvent(self, event):
-        """Handle window close event"""
-        # Stop recording if active
-        if self.recorder.isRunning():
-            self.recorder.stop()
-            self.volume_meter.setValue(0)  # Reset volume meter
-            self.recorder.wait()
+    def closeEvent(self, event: QCloseEvent):
+        """Override close event to minimize to tray instead of closing"""
+        if self.settings.get("minimize_to_tray", True):
+            event.ignore()
+            self.hide()
+            self.tray_icon.showMessage(
+                "Linux Cloud STT Notepad",
+                "Application minimized to system tray. Double-click the icon to restore.",
+                QSystemTrayIcon.Information,
+                2000
+            )
+        else:
+            # Save any pending changes
+            self._save_settings()
+            
+            # Accept the close event
+            event.accept()
+
+    def create_tray_icon(self):
+        """Create the system tray icon and menu"""
+        # Create tray icon
+        self.tray_icon = QSystemTrayIcon(self)
         
-        # Clean up temporary files
-        if self.recorder.temp_file and os.path.exists(self.recorder.temp_file.name):
-            try:
-                os.unlink(self.recorder.temp_file.name)
-            except:
-                pass
-                
-        # Clean up any other temporary files that might exist
-        try:
-            for file in os.listdir(tempfile.gettempdir()):
-                if file.endswith('.wav') or file.endswith('.mp3'):
-                    if os.path.isfile(os.path.join(tempfile.gettempdir(), file)):
-                        os.unlink(os.path.join(tempfile.gettempdir(), file))
-        except Exception as e:
-            print(f"Error cleaning up temporary files: {e}")
-            pass
+        # Create a simple programmatic icon
+        from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen, QBrush
+        from PyQt5.QtCore import Qt, QSize
         
-        # Accept the close event
-        event.accept()
+        # Create a pixmap
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        
+        # Create a painter to draw on the pixmap
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw a simple microphone icon
+        # Draw the microphone body (a rectangle with rounded corners)
+        painter.setPen(QPen(QColor(0, 0, 0)))
+        painter.setBrush(QBrush(QColor(80, 80, 80)))
+        painter.drawRoundedRect(5, 2, 6, 8, 2, 2)
+        
+        # Draw the microphone base
+        painter.drawRect(7, 10, 2, 2)
+        painter.drawRoundedRect(4, 12, 8, 2, 1, 1)
+        
+        painter.end()
+        
+        # Set the icon
+        self.tray_icon.setIcon(QIcon(pixmap))
+        
+        # Create tray menu
+        tray_menu = QMenu()
+        
+        # Add actions to the menu
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(self.show)
+        
+        hide_action = QAction("Hide", self)
+        hide_action.triggered.connect(self.hide)
+        
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.quit_application)
+        
+        # Add actions to menu
+        tray_menu.addAction(show_action)
+        tray_menu.addAction(hide_action)
+        tray_menu.addSeparator()
+        tray_menu.addAction(exit_action)
+        
+        # Set the menu for the tray icon
+        self.tray_icon.setContextMenu(tray_menu)
+        
+        # Show the tray icon
+        self.tray_icon.show()
+        
+        # Connect activated signal (for double-click)
+        self.tray_icon.activated.connect(self.tray_icon_activated)
+    
+    def tray_icon_activated(self, reason):
+        """Handle tray icon activation (click, double-click)"""
+        # Respond to both single clicks and double clicks
+        if reason == QSystemTrayIcon.Trigger or reason == QSystemTrayIcon.DoubleClick:
+            if self.isVisible():
+                self.hide()
+            else:
+                self.show()
+                self.activateWindow()
+    
+    def quit_application(self):
+        """Quit the application completely"""
+        self.tray_icon.hide()
+        QApplication.quit()
+    
+    def _create_about_tab(self):
+        """Create the About tab with information about the application"""
+        about_tab = QWidget()
+        about_layout = QVBoxLayout()
+        
+        # Title
+        title_label = QLabel("Linux Cloud STT Notepad")
+        title_label.setStyleSheet("font-size: 18pt; font-weight: bold;")
+        title_label.setAlignment(Qt.AlignCenter)
+        
+        # Description
+        desc_label = QLabel(
+            "A simple notepad application with speech-to-text capabilities using OpenAI's Whisper API."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setAlignment(Qt.AlignCenter)
+        
+        # Instructions
+        instructions = QLabel(
+            "<h3>Instructions:</h3>"
+            "<ol>"
+            "<li><b>Recording Audio:</b>"
+            "<ul>"
+            "<li>Select your audio input device from the dropdown menu</li>"
+            "<li>Click 'Start Recording' to begin capturing audio</li>"
+            "<li>Click 'Stop Recording' when you're finished</li>"
+            "</ul></li>"
+            "<li><b>Transcription:</b>"
+            "<ul>"
+            "<li>After recording, click 'Transcribe' to convert your speech to text</li>"
+            "<li>The application can handle recordings up to 1 hour in length</li>"
+            "<li>For longer recordings, the audio will be automatically split into chunks and transcribed separately</li>"
+            "</ul></li>"
+            "<li><b>Editing Text:</b>"
+            "<ul>"
+            "<li>The transcribed text will appear in the text editor</li>"
+            "<li>You can edit, copy, paste, and save the text as needed</li>"
+            "</ul></li>"
+            "<li><b>Saving:</b>"
+            "<ul>"
+            "<li>Click 'Save' to save your text to a file</li>"
+            "<li>Click 'Open' to load text from an existing file</li>"
+            "</ul></li>"
+            "</ol>"
+            "<p><b>Note:</b> This application requires an OpenAI API key to be set in a .env file for transcription.</p>"
+        )
+        instructions.setWordWrap(True)
+        instructions.setTextFormat(Qt.RichText)
+        
+        # Version
+        version_label = QLabel("Version: 1.0.0")
+        version_label.setAlignment(Qt.AlignCenter)
+        
+        # Add all widgets to layout
+        about_layout.addWidget(title_label)
+        about_layout.addWidget(desc_label)
+        about_layout.addSpacing(20)
+        about_layout.addWidget(instructions)
+        about_layout.addStretch(1)
+        about_layout.addWidget(version_label)
+        
+        about_tab.setLayout(about_layout)
+        return about_tab
 
 
 if __name__ == "__main__":
