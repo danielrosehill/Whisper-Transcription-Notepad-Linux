@@ -1,6 +1,6 @@
 # Linux-Cloud-STT-Notepad
 
-![alt text](screenshots/releases/v3/image.png)
+ ![alt text](screenshots/releases/v4/image.png)
 
 A minimalist notepad application for Linux with speech-to-text capabilities using the OpenAI API.
 
